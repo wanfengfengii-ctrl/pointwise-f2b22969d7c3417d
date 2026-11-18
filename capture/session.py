@@ -1,12 +1,10 @@
 from collections.abc import Callable
-from dataclasses import replace
 
 from archive.batches import BatchIntegrityError, SuccessReceipt, assemble_batch
 from archive.commit import CommitFailure, commit_batch
 from archive.storage import ArchivePath
 from orders.catalog import Catalog, OrderNotFound
 from orders.validation import OrderInputError
-from schedule.device_state import SETTLE_SECONDS, SWITCH_SECONDS
 from schedule.dispatch import NoFeasibleSuffix, reserve_actions
 
 from .observations import InvalidObservation, ObservationLedger
@@ -42,11 +40,17 @@ def run(
     ledger = ObservationLedger(order)
     try:
         state = validate_initial_state(device.snapshot())
-        for action in reserve_actions(state, ledger.remaining()):
+        while ledger.remaining():
+            # Re-judge the whole remaining suffix from the actual snapshot
+            # before every dispatch. A late receipt can invalidate the plan;
+            # with no feasible suffix we stop issuing sample actions.
+            actions = reserve_actions(state, ledger.remaining())
+            action = actions[0]
             ticket = action.ticket
             if action.kind == "switch":
-                actual = apply_switch_receipt(state, ticket.channel, device.switch(ticket.channel))
-                state = replace(actual, stable_at=action.at + SWITCH_SECONDS + SETTLE_SECONDS)
+                # The receipt carries the real completion second; the new
+                # channel becomes stable one second after that actual moment.
+                state = apply_switch_receipt(state, ticket.channel, device.switch(ticket.channel))
             elif action.kind == "wait":
                 target = action.at
                 if state.now < target:
